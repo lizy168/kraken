@@ -157,8 +157,7 @@ func (s *diskStore) create(key string, sizeBytes uint64) (FileReadWriter, error)
 		return nil, fmt.Errorf("ensure dir: %w", err)
 	}
 	blobPath := s.blobPath(key, _incompleteBlob)
-	flag := os.O_RDWR | os.O_CREATE | os.O_EXCL
-	f, err := os.OpenFile(blobPath, flag, _defaultFilePerm)
+	f, err := os.OpenFile(blobPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, _defaultFilePerm)
 	if err != nil {
 		s.releaseSpace(sizeBytes)
 		return nil, fmt.Errorf("open file: %w", err)
@@ -256,7 +255,6 @@ func (s *diskStore) markComplete(key string) error {
 	if err != nil {
 		return fmt.Errorf("mkdirall: %w", err)
 	}
-	// TODO - make sure that un-movable metadata is deleted after move
 	err = os.Rename(oldPathDir, newPathDir)
 	if err != nil {
 		return fmt.Errorf("move dir: %w", err)
@@ -266,7 +264,33 @@ func (s *diskStore) markComplete(key string) error {
 		node := s.evictQueue.PushBack(key)
 		b.node = node
 	}
+
+	s.tryDeleteImmovableMetadata(key)
 	return nil
+}
+
+// Best-effort attempt to remove immovable metadata. Fail-open on failure
+// to avoid an inconsistent state, as failure only costs a negligible amount
+// of disk until the blob is evicted.
+func (s *diskStore) tryDeleteImmovableMetadata(key string) {
+	mdList, err := s.listMetadataNoLock(key, blobScopeAny)
+	if err != nil {
+		err = fmt.Errorf("list metadata: %w", err)
+		s.log.With("error", err).Error("Failed to delete un-movable metadata upon marking a blob as complete")
+		return
+	}
+	for _, md := range mdList {
+		if md.Movable() {
+			continue
+		}
+		mdFilePath := s.sidecarFilePath(key, _completeBlob, md.GetSuffix())
+		err = os.Remove(mdFilePath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			err = fmt.Errorf("remove metadata file: %w", err)
+			s.log.With("error", err).Error("Failed to delete un-movable metadata upon marking a blob as complete")
+			continue
+		}
+	}
 }
 
 func (s *diskStore) checkDiskIfUnevictable(key string, complete bool) (bool, error) {
@@ -396,7 +420,7 @@ func (s *diskStore) setMetadata(key string, md metadata.Metadata, scope blobScop
 		return fmt.Errorf("serialize metadata: %w", err)
 	}
 	mdFilePath := s.sidecarFilePath(key, b.complete, md.GetSuffix())
-	// We use a tmp file to ensure atomicity.
+	// Use a tmp file to ensure atomicity.
 	tmpFilePath := mdFilePath + "-tmp"
 	tmpFile, err := os.OpenFile(tmpFilePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, _defaultFilePerm)
 	if err != nil {
@@ -434,6 +458,9 @@ func (s *diskStore) getMetadata(key string, md metadata.Metadata, scope blobScop
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
+	if err != nil {
+		return false, fmt.Errorf("open metadata file: %w", err)
+	}
 	defer closers.Close(mdFile)
 	data, err := io.ReadAll(mdFile)
 	if err != nil {
@@ -466,6 +493,73 @@ func (s *diskStore) deleteMetadata(key string, md metadata.Metadata, scope blobS
 	if err != nil {
 		return fmt.Errorf("remove metadata file: %w", err)
 	}
+	return nil
+}
+
+func (s *diskStore) listMetadata(key string, scope blobScope) ([]metadata.Metadata, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.listMetadataNoLock(key, scope)
+}
+
+func (s *diskStore) listMetadataNoLock(key string, scope blobScope) ([]metadata.Metadata, error) {
+	b, ok := s.blobs[key]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	if err := isOutOfScope(b, scope); err != nil {
+		return nil, err
+	}
+
+	res := make([]metadata.Metadata, 0)
+	entries, err := os.ReadDir(s.dirPath(key, b.complete))
+	if err != nil {
+		return nil, fmt.Errorf("read metadata files from dir: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == _blobFileName || name == _evictionBannedFileName || name == _blobSizeFileName {
+			continue
+		}
+
+		md := metadata.CreateFromSuffix(name)
+		if md == nil {
+			s.log.With("key", key, "file_name", name).Warn("Found file in blob dir that does not successfully parse as a metadata file")
+			continue
+		}
+		res = append(res, md)
+	}
+	return res, nil
+}
+
+func (s *diskStore) writeAtMetadata(key string, md metadata.Metadata, p []byte, off int64, scope blobScope) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, ok := s.blobs[key]
+	if !ok {
+		return os.ErrNotExist
+	}
+	if err := isOutOfScope(b, scope); err != nil {
+		return err
+	}
+
+	mdFilePath := s.sidecarFilePath(key, b.complete, md.GetSuffix())
+	mdFile, err := os.OpenFile(mdFilePath, os.O_WRONLY, _defaultFilePerm)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("metadata does not exist")
+	}
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer closers.Close(mdFile)
+
+	_, err = mdFile.WriteAt(p, off)
+	if err != nil {
+		return fmt.Errorf("write at: %w", err)
+	}
+
 	return nil
 }
 

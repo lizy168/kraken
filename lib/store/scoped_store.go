@@ -92,6 +92,16 @@ func (s *DiskStore) DeleteMetadata(key string, md metadata.Metadata) error {
 	return s.deleteMetadata(key, md, s.scope)
 }
 
+// ListMetadata returns all [metadata.Metadata] of key.
+func (s *DiskStore) ListMetadata(key string) ([]metadata.Metadata, error) {
+	return s.listMetadata(key, s.scope)
+}
+
+// WriteAtMetadata implements [io.WriterAt] for the metadata file on disk.
+func (s *DiskStore) WriteAtMetadata(key string, md metadata.Metadata, p []byte, off int64) error {
+	return s.writeAtMetadata(key, md, p, off, s.scope)
+}
+
 // ScopeComplete scopes [DiskStore]'s APIs such that they can only operate on complete blobs.
 // [ErrOutOfScope] is returned if the user tries to operate on an incomplete blob.
 func (s *DiskStore) ScopeComplete() *DiskStore { return &DiskStore{s.diskStore, blobScopeComplete} }
