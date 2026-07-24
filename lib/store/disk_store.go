@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/uber-go/tally"
 	"github.com/uber/kraken/lib/store/metadata"
 	"github.com/uber/kraken/utils/closers"
 	"github.com/uber/kraken/utils/log"
@@ -34,6 +36,8 @@ const (
 	_blobSizeFileName       = "_size"
 )
 
+var _syncEvictionLatencyBuckets = tally.MustMakeExponentialDurationBuckets(100*time.Millisecond, 1.4, 15)
+
 // diskStore implements the APIs of [DiskStore]. [diskStore]'s APIs expose the [blobScope] arg,
 // while [DiskStore]'s APIs omit that arg (cleaner interface) and instead expose other APIs to scope the whole store.
 //
@@ -49,6 +53,7 @@ type diskStore struct {
 	// If disabled, incomplete blobs are discarded (usually done to prevent leaks).
 	rebootIncompleteBlobs bool
 	log                   *zap.SugaredLogger
+	metrics               tally.Scope
 	*pather
 }
 
@@ -59,7 +64,7 @@ type blob struct {
 	evictionBanned bool
 }
 
-func newDiskStore(capacityBytes uint64, rootDir string, rebootIncompleteBlobs bool) (*diskStore, error) {
+func newDiskStore(capacityBytes uint64, rootDir string, rebootIncompleteBlobs bool, metrics tally.Scope) (*diskStore, error) {
 	// TODO - create a Config struct.
 	// TODO - consider how to support blob mutation, which might be needed by build-index for tag mutation.
 	// TODO - move disk store files into their own directory and package.
@@ -79,12 +84,13 @@ func newDiskStore(capacityBytes uint64, rootDir string, rebootIncompleteBlobs bo
 			blobs:                 make(map[string]*blob),
 			evictQueue:            list.New(),
 			log:                   log,
+			metrics:               metrics,
 			pather:                newPather(rootDir),
 			rebootIncompleteBlobs: rebootIncompleteBlobs,
 		}, nil
 	}
 
-	store, err := rebootPersistedStore(capacityBytes, rootDir, rebootIncompleteBlobs, log)
+	store, err := rebootPersistedStore(capacityBytes, rootDir, rebootIncompleteBlobs, log, metrics)
 	if err != nil {
 		err = fmt.Errorf("reboot persisted state into memory: %w", err)
 		log.With("error", err).Error("Failed to initialize disk store")
@@ -187,19 +193,24 @@ func (s *diskStore) persistBlobSize(key string, sizeBytes uint64) error {
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
+	defer closers.Close(blobSizeF)
 	_, err = blobSizeF.Write([]byte(strconv.Itoa(int(sizeBytes))))
 	if err != nil {
 		return fmt.Errorf("write to size file: %w", err)
 	}
-	closers.Close(blobSizeF)
 	return nil
 }
 
 func (s *diskStore) reserveSpace(space uint64) error {
 	// TODO - benchmark and consider whether async eviction makes more sense.
-	// TODO - emit latency to reserve space for a blob.
+	startTime := time.Now()
 	for s.size+space > s.capacity {
 		if s.evictQueue.Len() == 0 {
+			s.log.With(
+				"unevictable_bytes", s.size,
+				"required_space", space,
+				"capacity", s.capacity,
+			).Error("Cannot evict enough data to free space for new entry to DiskStore. The unevictable/incomplete blobs are using up all the space")
 			return errors.New("cannot evict enough, the unevictable/incomplete blobs are using up all the space")
 		}
 
@@ -208,7 +219,6 @@ func (s *diskStore) reserveSpace(space uint64) error {
 
 		err := s.deleteFromDisk(toEvictKey, _completeBlob)
 		if err != nil {
-			// TODO - consider whether we want to fail-open by doing `continue` here.
 			return fmt.Errorf("delete from disk: %w", err)
 		}
 		s.evictQueue.Remove(toEvictNode)
@@ -216,8 +226,10 @@ func (s *diskStore) reserveSpace(space uint64) error {
 		s.releaseSpace(size)
 		delete(s.blobs, toEvictKey)
 	}
-
 	s.size += space
+
+	latency := time.Since(startTime)
+	s.metrics.Histogram("sync_eviction_latency", _syncEvictionLatencyBuckets).RecordDuration(latency)
 	return nil
 }
 
@@ -426,13 +438,10 @@ func (s *diskStore) setMetadata(key string, md metadata.Metadata, scope blobScop
 	if err != nil {
 		return fmt.Errorf("create tmp file for md: %w", err)
 	}
+	defer closers.Close(tmpFile)
 	_, err = tmpFile.Write(mdData)
 	if err != nil {
 		return fmt.Errorf("write to tmp file: %w", err)
-	}
-	err = tmpFile.Close()
-	if err != nil {
-		return fmt.Errorf("close tmp file: %w", err)
 	}
 	err = os.Rename(tmpFile.Name(), mdFilePath)
 	if err != nil {

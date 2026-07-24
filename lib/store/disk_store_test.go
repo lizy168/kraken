@@ -2,7 +2,6 @@ package store
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/uber-go/tally"
 	"github.com/uber/kraken/core"
 	"github.com/uber/kraken/lib/store/metadata"
 	"github.com/uber/kraken/utils/memsize"
@@ -23,9 +23,9 @@ import (
 func newTestStore(t *testing.T, capacity uint64, rebootIncompleteBlobs bool) (res *DiskStore, rootDir string) {
 	rootDir, err := os.MkdirTemp("/tmp", "kraken-disk-store")
 	require.NoError(t, err)
-	t.Cleanup(func() { os.RemoveAll(rootDir) })
+	t.Cleanup(func() { _ = os.RemoveAll(rootDir) })
 
-	store, err := NewDiskStore(capacity, rootDir, rebootIncompleteBlobs)
+	store, err := NewDiskStore(capacity, rootDir, rebootIncompleteBlobs, tally.NoopScope)
 	require.NoError(t, err)
 	return store, rootDir
 }
@@ -276,7 +276,7 @@ func TestParallelAccessToSingleFile(t *testing.T) {
 	wg.Wait()
 	for idx := range 5 {
 		require.NoError(results[idx].err)
-		require.Equal(results[idx].written, results[idx].written)
+		require.Equal(results[idx].written, results[idx].read)
 	}
 
 	require.NoError(store.MarkComplete(key))
@@ -398,7 +398,7 @@ func TestDelete(t *testing.T) {
 		key := core.DigestFixture().Hex()
 
 		err := store.Delete(key)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 	})
 }
 
@@ -471,7 +471,7 @@ func TestMarkComplete(t *testing.T) {
 		key := core.DigestFixture().Hex()
 
 		err := store.MarkComplete(key)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 	})
 }
 
@@ -571,9 +571,9 @@ func TestStat(t *testing.T) {
 		key := core.DigestFixture().Hex()
 
 		_, err := store.ScopeComplete().Stat(key)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 		_, err = store.Stat(key)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 	})
 }
 
@@ -682,7 +682,7 @@ func TestMetadata(t *testing.T) {
 		mdFilePath := store.sidecarFilePath(key, _incompleteBlob, readMd.GetSuffix())
 		// ensure the metadata file is deleted from disk
 		_, err = os.Stat(mdFilePath)
-		require.True(errors.Is(err, os.ErrNotExist))
+		require.ErrorIs(err, os.ErrNotExist)
 		// deleting a second time should be a no-op.
 		require.NoError(store.DeleteMetadata(key, &readMd))
 
@@ -705,20 +705,20 @@ func TestMetadata(t *testing.T) {
 		md := metadata.NewTorrentMeta(mdStruct)
 
 		err := store.SetMetadata(nonExistentKey, md)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 
 		ok, err := store.GetMetadata(nonExistentKey, md)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 		require.False(ok)
 
 		_, err = store.ListMetadata(nonExistentKey)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 
 		err = store.WriteAtMetadata(nonExistentKey, md, []byte("data"), 0)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 
 		err = store.DeleteMetadata(nonExistentKey, md)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 	})
 
 	t.Run("metadata does not change after marking a file as complete and/or evictable/unevictable", func(t *testing.T) {
@@ -784,10 +784,10 @@ func TestMetadata(t *testing.T) {
 		defer func() { require.NoError(fB.Close()) }()
 
 		ok, err := store.GetMetadata(keyA, md)
-		require.Equal(os.ErrNotExist, err)
+		require.ErrorIs(os.ErrNotExist, err)
 		require.False(ok)
 		_, err = os.Stat(mdFilePath)
-		require.True(errors.Is(err, os.ErrNotExist))
+		require.ErrorIs(err, os.ErrNotExist)
 	})
 
 	t.Run("immovable metadata is deleted when calling MarkComplete", func(t *testing.T) {

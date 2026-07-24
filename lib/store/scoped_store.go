@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 
+	"github.com/uber-go/tally"
 	"github.com/uber/kraken/lib/store/metadata"
 )
 
@@ -36,8 +37,8 @@ type DiskStore struct {
 //
 //   - If the store's size is bigger than its capacity (e.g. configured capacity has been reduced or files have been leaked),
 //     it evicts blobs until size is within capacity.
-func NewDiskStore(capacityBytes uint64, rootDir string, rebootIncompleteBlobs bool) (*DiskStore, error) {
-	diskStore, err := newDiskStore(capacityBytes, rootDir, rebootIncompleteBlobs)
+func NewDiskStore(capacityBytes uint64, rootDir string, rebootIncompleteBlobs bool, metrics tally.Scope) (*DiskStore, error) {
+	diskStore, err := newDiskStore(capacityBytes, rootDir, rebootIncompleteBlobs, metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -54,10 +55,10 @@ func (s *diskStore) Create(key string, sizeBytes uint64) (FileReadWriter, error)
 	return s.create(key, sizeBytes)
 }
 
-// Open returns an FD to a file in the store. [os.ErrNotExists] is returned on missing entry.
+// Open returns an FD to a file in the store. [os.ErrNotExist] is returned on missing entry.
 func (s *DiskStore) Open(key string) (FileReadWriter, error) { return s.open(key, s.scope) }
 
-// Stat returns [os.FileInfo] about the blob. Returns [os.ErrNotExists] if the blob is not found.
+// Stat returns [os.FileInfo] about the blob. Returns [os.ErrNotExist] if the blob is not found.
 func (s *DiskStore) Stat(key string) (os.FileInfo, error) { return s.stat(key, s.scope) }
 
 // MarkComplete marks a blob as fully written. It enlists the blob for LRU eviction (unless BanEviction has been called).
@@ -82,7 +83,7 @@ func (s *DiskStore) SetMetadata(key string, md metadata.Metadata) error {
 	return s.setMetadata(key, md, s.scope)
 }
 
-// GetMetadata populates `md` if the metadata is present. Returns [os.ErrNotExists] if key is not in store.
+// GetMetadata populates `md` if the metadata is present. Returns [os.ErrNotExist] if key is not in store.
 func (s *DiskStore) GetMetadata(key string, md metadata.Metadata) (ok bool, err error) {
 	return s.getMetadata(key, md, s.scope)
 }
