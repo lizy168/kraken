@@ -1,4 +1,4 @@
-package store
+package disk
 
 import (
 	"container/list"
@@ -24,22 +24,22 @@ type blobState struct {
 	complete  bool
 }
 
-func rebootPersistedStore(capacityBytes uint64, rootDir string, rebootIncompleteBlobs bool, shardLength int, log *zap.SugaredLogger, metrics tally.Scope) (*diskStore, error) {
-	completeDirPath, incompleteDirPath := filepath.Join(rootDir, _completeSubDir), filepath.Join(rootDir, _incompleteSubDir)
-	if !rebootIncompleteBlobs {
+func rebootPersistedStore(config *Config, log *zap.SugaredLogger, metrics tally.Scope) (*store, error) {
+	completeDirPath, incompleteDirPath := filepath.Join(config.RootDir, _completeSubDir), filepath.Join(config.RootDir, _incompleteSubDir)
+	if !config.RebootIncompleteBlobs {
 		err := os.RemoveAll(incompleteDirPath)
 		if err != nil {
 			return nil, fmt.Errorf("remove incomplete blobs left from a previous service run: %w", err)
 		}
 	}
 
-	pather := newPather(rootDir, shardLength)
+	pather := newPather(config.RootDir, config.ShardLength)
 	keys, err := pather.rebootKeys(completeDirPath)
 	if err != nil {
 		return nil, err
 	}
 	numCompleteBlobs := len(keys)
-	if rebootIncompleteBlobs {
+	if config.RebootIncompleteBlobs {
 		incompleteKeys, err := pather.rebootKeys(incompleteDirPath)
 		if err != nil {
 			return nil, err
@@ -94,15 +94,15 @@ func rebootPersistedStore(capacityBytes uint64, rootDir string, rebootIncomplete
 		storeSize += bState.size
 	}
 
-	store := &diskStore{
-		blobs:                 blobs,
-		evictQueue:            evictQueue,
-		capacity:              capacityBytes,
-		pather:                pather,
-		size:                  storeSize,
-		rebootIncompleteBlobs: rebootIncompleteBlobs,
-		log:                   log,
-		metrics:               metrics,
+	store := &store{
+		blobs:      blobs,
+		evictQueue: evictQueue,
+		capacity:   config.CapacityBytes,
+		size:       storeSize,
+		pather:     pather,
+		config:     config,
+		log:        log,
+		metrics:    metrics,
 	}
 
 	if store.size > store.capacity {
@@ -110,11 +110,11 @@ func rebootPersistedStore(capacityBytes uint64, rootDir string, rebootIncomplete
 		// evicts entries until size <= capacity.
 		err = store.reserveSpace(0)
 		if err != nil {
-			log.With("error", err).Error("DiskStore size exceeds its capacity after service reboot. Evicting blobs from disk did not work to reduce size within capacity.")
+			log.With("error", err).Error("Store size exceeds its capacity after service reboot. Evicting blobs from disk did not work to reduce size within capacity.")
 			return nil, fmt.Errorf("remove blobs to reduce store size within configured capacity: %w", err)
 		}
 		evictedBytes := prevSize - store.size
-		log.With("evicted_bytes", evictedBytes).Warn("DiskStore size exceeded its capacity after service reboot. Successfully evicted blobs to reduce size within capacity.")
+		log.With("evicted_bytes", evictedBytes).Warn("Store size exceeded its capacity after service reboot. Successfully evicted blobs to reduce size within capacity.")
 	}
 	return store, nil
 }

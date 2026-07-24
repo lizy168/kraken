@@ -1,4 +1,4 @@
-package store
+package disk
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uber-go/tally"
 	"github.com/uber/kraken/core"
+	storelib "github.com/uber/kraken/lib/store"
 	"github.com/uber/kraken/lib/store/metadata"
 	"github.com/uber/kraken/utils/memsize"
 )
@@ -24,17 +25,23 @@ const (
 	_defaultShardLength = 2
 )
 
-func newTestStore(t *testing.T, capacity uint64, rebootIncompleteBlobs bool) (res *DiskStore, rootDir string) {
+func newTestStore(t *testing.T, capacity uint64, rebootIncompleteBlobs bool) (res *Store, rootDir string) {
 	rootDir, err := os.MkdirTemp("/tmp", "kraken-disk-store")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(rootDir) })
+	config := &Config{
+		CapacityBytes:         capacity,
+		RootDir:               rootDir,
+		RebootIncompleteBlobs: rebootIncompleteBlobs,
+		ShardLength:           _defaultShardLength,
+	}
 
-	store, err := NewDiskStore(capacity, rootDir, rebootIncompleteBlobs, _defaultShardLength, tally.NoopScope)
+	store, err := NewStore(config, tally.NoopScope)
 	require.NoError(t, err)
 	return store, rootDir
 }
 
-func newTestFile(t *testing.T, store *DiskStore, size uint64) (f FileReadWriter, key string) {
+func newTestFile(t *testing.T, store *Store, size uint64) (f storelib.FileReadWriter, key string) {
 	require := require.New(t)
 	key = core.DigestFixture().Hex()
 	f, err := store.Create(key, size)
@@ -43,7 +50,7 @@ func newTestFile(t *testing.T, store *DiskStore, size uint64) (f FileReadWriter,
 }
 
 // does not count 1) the directories for sharding, 2) metadata files, and 3) the _eviction_banned flag file.
-func numBlobsOnDisk(t *testing.T, store *DiskStore) int {
+func numBlobsOnDisk(t *testing.T, store *Store) int {
 	numBlobs := 0
 	err := filepath.WalkDir(store.dir, func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
@@ -61,7 +68,7 @@ func numBlobsOnDisk(t *testing.T, store *DiskStore) int {
 	return numBlobs
 }
 
-func TestDiskStore(t *testing.T) {
+func TestStore(t *testing.T) {
 	require := require.New(t)
 	store, _ := newTestStore(t, 10*memsize.KB, false)
 
