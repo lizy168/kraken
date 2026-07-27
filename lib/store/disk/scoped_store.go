@@ -1,17 +1,12 @@
 package disk
 
 import (
-	"errors"
 	"os"
 
 	"github.com/uber-go/tally"
 	storelib "github.com/uber/kraken/lib/store"
 	"github.com/uber/kraken/lib/store/metadata"
 )
-
-// ErrOutOfScope is returned when the provided key is in the store, but not in the store's [blobScope],
-// e.g. if the blob is incomplete, but ScopeComplete was called.
-var ErrOutOfScope = errors.New("the blob is in Store but filtered by the selected scope")
 
 // Store is a key-value, persistent, thread-safe, LRU store for blobs and their [metadata.Metadata].
 //
@@ -28,7 +23,7 @@ var ErrOutOfScope = errors.New("the blob is in Store but filtered by the selecte
 //   - Supports directory sharding to speed up disk performance.
 type Store struct {
 	impl  *store
-	scope blobScope
+	scope storelib.BlobScope
 }
 
 // NewStore initializes a new [*Store]. If the store has been initialized in the same
@@ -45,7 +40,7 @@ func NewStore(config *Config, metrics tally.Scope) (*Store, error) {
 	}
 	return &Store{
 		impl:  s,
-		scope: blobScopeAny,
+		scope: storelib.BlobScopeAny,
 	}, nil
 }
 
@@ -105,9 +100,9 @@ func (s *Store) WriteAtMetadata(key string, md metadata.Metadata, p []byte, off 
 }
 
 // ScopeComplete scopes [Store]'s APIs such that they can only operate on complete blobs (except MarkComplete and Create).
-// [ErrOutOfScope] is returned if the user tries to operate on an incomplete blob.
-func (s *Store) ScopeComplete() *Store { return &Store{s.impl, blobScopeComplete} }
+// [storelib.ErrOutOfScope] is returned if the user tries to operate on an incomplete blob.
+func (s *Store) ScopeComplete() *Store { return &Store{s.impl, storelib.BlobScopeComplete} }
 
 // ScopeIncomplete scopes [Store]'s APIs such that they can only operate on incomplete blobs.
-// [ErrOutOfScope] is returned if the user tries to operate on a complete blob.
-func (s *Store) ScopeIncomplete() *Store { return &Store{s.impl, blobScopeIncomplete} }
+// [storelib.ErrOutOfScope] is returned if the user tries to operate on a complete blob.
+func (s *Store) ScopeIncomplete() *Store { return &Store{s.impl, storelib.BlobScopeIncomplete} }
