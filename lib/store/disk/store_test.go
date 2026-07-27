@@ -2,6 +2,7 @@ package disk
 
 import (
 	"bytes"
+	"crypto/rand"
 	"io"
 	"io/fs"
 	"os"
@@ -333,6 +334,83 @@ func TestOpenedFileAccessibleAfterMarkedComplete(t *testing.T) {
 
 	require.Equal([]byte("Hello World"), incompleteFileData)
 	require.Equal([]byte("Hello World"), completeFileData)
+}
+
+func TestMisreportedBlobSize(t *testing.T) {
+	t.Run("user overreports size", func(t *testing.T) {
+		require := require.New(t)
+		store, _ := newTestStore(t, 25*memsize.KB, true)
+
+		// We pad the store's size to 1KB before all other operations to later show that size does not underflow when releasing space.
+		_, _ = newTestFile(t, store, 1*memsize.KB)
+
+		f, key := newTestFile(t, store, 10*memsize.KB)
+		data := make([]byte, 5*memsize.KB)
+		_, err := rand.Read(data)
+		require.NoError(err)
+		_, err = io.Copy(f, bytes.NewReader(data))
+		require.NoError(err)
+		require.NoError(f.Close())
+
+		f, err = store.Open(key)
+		require.NoError(err)
+
+		// io.ReadAll only returns the 5KB of actual data, despite us reporting the blob as 10KB. There is no 5KB of trailing space.
+		readData, err := io.ReadAll(f)
+		require.NoError(err)
+		require.Equal(data, readData)
+
+		// Stat returns the actual size of the blob.
+		fi, err := store.Stat(key)
+		require.NoError(err)
+		require.Equal(uint64(fi.Size()), 5*memsize.KB)
+
+		// The store always calculates its size based off the client-reported size, not the actual size.
+		require.Equal(11*memsize.KB, store.impl.size)
+
+		// Both space reservation and space release use the user-reported value, not the actual size of the blob.
+		// Due to this consistency, the store's size is the same before adding and after deleting/evicting the blob.
+		require.NoError(store.Delete(key))
+		require.Equal(1*memsize.KB, store.impl.size)
+	})
+
+	t.Run("user underreports size", func(t *testing.T) {
+		require := require.New(t)
+		store, _ := newTestStore(t, 25*memsize.KB, true)
+
+		// We pad the store's size to 1KB before all other operations to later show that size does not underflow when releasing space.
+		_, _ = newTestFile(t, store, 1*memsize.KB)
+
+		// We write 30KB to the file even though the store can only store 24KB. The store lets us do this and does not evict the blob.
+		f, key := newTestFile(t, store, 24*memsize.KB)
+		data := make([]byte, 30*memsize.KB)
+		_, err := rand.Read(data)
+		require.NoError(err)
+		_, err = io.Copy(f, bytes.NewReader(data))
+		require.NoError(err)
+		require.NoError(f.Close())
+
+		f, err = store.Open(key)
+		require.NoError(err)
+
+		// io.ReadAll only returns the 30KB of actual data, despite us reporting the blob as 24KB. The file is resize-able.
+		readData, err := io.ReadAll(f)
+		require.NoError(err)
+		require.Equal(data, readData)
+
+		// Stat returns the actual size of the blob.
+		fi, err := store.Stat(key)
+		require.NoError(err)
+		require.Equal(uint64(fi.Size()), 30*memsize.KB)
+
+		// The store always calculates its size based off the client-reported size, not the actual size.
+		require.Equal(25*memsize.KB, store.impl.size)
+
+		// Both space reservation and space release use the user-reported value, not the actual size of the blob.
+		// Due to this consistency, the store's size is the same before adding and after deleting/evicting the blob.
+		require.NoError(store.Delete(key))
+		require.Equal(1*memsize.KB, store.impl.size)
+	})
 }
 
 func TestDelete(t *testing.T) {
