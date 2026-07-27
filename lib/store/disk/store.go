@@ -45,13 +45,11 @@ var _syncEvictionLatencyBuckets = tally.MustMakeExponentialDurationBuckets(100*t
 // Check [Store]'s comments for details on functionality.
 type store struct {
 	capacity   uint64
-	size       uint64           // includes both used and reserved space.
+	size       uint64           // Includes both actively-used and not yet used, but reserved space.
 	blobs      map[string]*blob // TODO - consider whether it's better to use struct instead of pointer to reduce GC stress.
-	evictQueue *list.List       // Back is most recently used, front is the next to evict.
-	// synchronizes mem state access and syscalls to the fs in the APIs (opening, moving files, etc.)
-	mu sync.RWMutex // TODO - evaluate whether the read-to-write ratio is more appropriate for a [sync.Mutex] instead.
-	// If enabled, incomplete blobs are rebooted in the store upon restart (or after a crash), allowing users to continue using the blob.
-	// If disabled, incomplete blobs are discarded (usually done to prevent leaks).
+	evictQueue *list.List       // Front is the next to evict.
+	// Synchronizes 1) mem state and 2) disk state. Only acquired by public methods.
+	mu      sync.RWMutex // TODO - evaluate whether the read-to-write ratio is more appropriate for a [sync.Mutex] instead.
 	config  *Config
 	log     *zap.SugaredLogger
 	metrics tally.Scope
@@ -59,7 +57,7 @@ type store struct {
 }
 
 type blob struct {
-	node           *list.Element // value of [list.Element] is [string].
+	node           *list.Element // Value of [list.Element] is [string].
 	size           uint64
 	complete       bool
 	evictionBanned bool
@@ -97,7 +95,7 @@ func newStore(config *Config, metrics tally.Scope) (*store, error) {
 	return store, nil
 }
 
-func (s *store) open(key string, scope blobScope) (storelib.FileReadWriter, error) {
+func (s *store) Open(key string, scope blobScope) (storelib.FileReadWriter, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -120,9 +118,9 @@ func (s *store) open(key string, scope blobScope) (storelib.FileReadWriter, erro
 	return storelib.NewReadWriter(f), nil
 }
 
-func (s *store) stat(key string, scope blobScope) (os.FileInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *store) Stat(key string, scope blobScope) (os.FileInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	b, ok := s.blobs[key]
 	if !ok {
@@ -131,11 +129,12 @@ func (s *store) stat(key string, scope blobScope) (os.FileInfo, error) {
 	if err := isOutOfScope(b, scope); err != nil {
 		return nil, err
 	}
+	// TODO - consider whether this should update the access time of the blob.
 	blobPath := s.blobPath(key, b.complete)
 	return os.Stat(blobPath)
 }
 
-func (s *store) create(key string, sizeBytes uint64) (storelib.FileReadWriter, error) {
+func (s *store) Create(key string, sizeBytes uint64) (storelib.FileReadWriter, error) {
 	// TODO - we might want some TTI on uploads to the store, after which we cancel the upload, e.g. 1min without the client uploading more data.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -245,7 +244,7 @@ func (s *store) deleteFromDisk(key string, complete bool) error {
 	return os.RemoveAll(dir)
 }
 
-func (s *store) markComplete(key string) error {
+func (s *store) MarkComplete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -311,7 +310,7 @@ func (s *store) checkDiskIfUnevictable(key string, complete bool) (bool, error) 
 	return unevictable, nil
 }
 
-func (s *store) delete(key string, scope blobScope) error {
+func (s *store) Delete(key string, scope blobScope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -350,7 +349,7 @@ func (s *store) list(scope blobScope) []string {
 	return res
 }
 
-func (s *store) banEviction(key string, scope blobScope) error {
+func (s *store) BanEviction(key string, scope blobScope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -382,7 +381,7 @@ func (s *store) banEviction(key string, scope blobScope) error {
 	return nil
 }
 
-func (s *store) unbanEviction(key string, scope blobScope) error {
+func (s *store) UnbanEviction(key string, scope blobScope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -412,7 +411,7 @@ func (s *store) unbanEviction(key string, scope blobScope) error {
 	return nil
 }
 
-func (s *store) setMetadata(key string, md metadata.Metadata, scope blobScope) error {
+func (s *store) SetMetadata(key string, md metadata.Metadata, scope blobScope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -447,7 +446,7 @@ func (s *store) setMetadata(key string, md metadata.Metadata, scope blobScope) e
 	return nil
 }
 
-func (s *store) getMetadata(key string, md metadata.Metadata, scope blobScope) (ok bool, err error) {
+func (s *store) GetMetadata(key string, md metadata.Metadata, scope blobScope) (ok bool, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -479,7 +478,7 @@ func (s *store) getMetadata(key string, md metadata.Metadata, scope blobScope) (
 	return true, nil
 }
 
-func (s *store) deleteMetadata(key string, md metadata.Metadata, scope blobScope) error {
+func (s *store) DeleteMetadata(key string, md metadata.Metadata, scope blobScope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -502,7 +501,7 @@ func (s *store) deleteMetadata(key string, md metadata.Metadata, scope blobScope
 	return nil
 }
 
-func (s *store) listMetadata(key string, scope blobScope) ([]metadata.Metadata, error) {
+func (s *store) ListMetadata(key string, scope blobScope) ([]metadata.Metadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -539,7 +538,7 @@ func (s *store) listMetadataNoLock(key string, scope blobScope) ([]metadata.Meta
 	return res, nil
 }
 
-func (s *store) writeAtMetadata(key string, md metadata.Metadata, p []byte, off int64, scope blobScope) error {
+func (s *store) WriteAtMetadata(key string, md metadata.Metadata, p []byte, off int64, scope blobScope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

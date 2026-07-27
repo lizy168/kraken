@@ -51,7 +51,7 @@ func TestCrashRecovery(t *testing.T) {
 		data, err := io.ReadAll(f)
 		require.NoError(err)
 		require.Equal(incompleteEvictableData, data)
-		unevictable, err := store.checkDiskIfUnevictable(completeEvictableKey, _incompleteBlob)
+		unevictable, err := store.impl.checkDiskIfUnevictable(completeEvictableKey, _incompleteBlob)
 		require.NoError(err)
 		require.False(unevictable)
 
@@ -61,7 +61,7 @@ func TestCrashRecovery(t *testing.T) {
 		data, err = io.ReadAll(f)
 		require.NoError(err)
 		require.Equal(incompleteUnevictableData, data)
-		unevictable, err = store.checkDiskIfUnevictable(completeEvictableKey, _incompleteBlob)
+		unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _incompleteBlob)
 		require.NoError(err)
 		require.False(unevictable)
 
@@ -72,7 +72,7 @@ func TestCrashRecovery(t *testing.T) {
 		data, err = io.ReadAll(f)
 		require.NoError(err)
 		require.Equal(completeEvictableData, data)
-		unevictable, err = store.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
+		unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
 		require.NoError(err)
 		require.False(unevictable)
 
@@ -82,12 +82,12 @@ func TestCrashRecovery(t *testing.T) {
 		data, err = io.ReadAll(f)
 		require.NoError(err)
 		require.Equal(completeUnevictableData, data)
-		unevictable, err = store.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
+		unevictable, err = store.impl.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
 		require.NoError(err)
 		require.True(unevictable)
 
 		// The sizes of both incomplete and complete files are recovered correctly.
-		require.Equal(8*memsize.KB, store.size)
+		require.Equal(8*memsize.KB, store.impl.size)
 
 		// Run the store with `rebootIncompleteBlobs` as false.
 		store, err = NewStore(&Config{10 * memsize.KB, rootDir, false, _defaultShardLength}, tally.NoopScope)
@@ -105,7 +105,7 @@ func TestCrashRecovery(t *testing.T) {
 		data, err = io.ReadAll(f)
 		require.NoError(err)
 		require.Equal(completeEvictableData, data)
-		unevictable, err = store.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
+		unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
 		require.NoError(err)
 		require.False(unevictable)
 
@@ -115,11 +115,11 @@ func TestCrashRecovery(t *testing.T) {
 		data, err = io.ReadAll(f)
 		require.NoError(err)
 		require.Equal(completeUnevictableData, data)
-		unevictable, err = store.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
+		unevictable, err = store.impl.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
 		require.NoError(err)
 		require.True(unevictable)
 
-		require.Equal(4*memsize.KB, store.size)
+		require.Equal(4*memsize.KB, store.impl.size)
 	})
 
 	t.Run("metadata is recovered for complete blob", func(t *testing.T) {
@@ -191,13 +191,13 @@ func TestCrashRecovery(t *testing.T) {
 		_ = fillWithRandomData(t, eF, 2*memsize.KB)
 		require.NoError(eF.Close())
 		require.NoError(store.MarkComplete(eKey))
-		require.Equal([]string{cKey, dKey, eKey}, store.evictionOrder()) // a is unevictable and b is incomplete
+		require.Equal([]string{cKey, dKey, eKey}, store.impl.evictionOrder()) // a is unevictable and b is incomplete
 
 		// reset the access time for d
 		dF, err := store.ScopeComplete().Open(dKey)
 		require.NoError(err)
 		require.NoError(dF.Close())
-		evictionOrderBeforeCrash := store.evictionOrder()
+		evictionOrderBeforeCrash := store.impl.evictionOrder()
 		require.Equal([]string{cKey, eKey, dKey}, evictionOrderBeforeCrash) // a is unevictable and b is incomplete
 
 		// Assume that the application restarts here.
@@ -205,7 +205,7 @@ func TestCrashRecovery(t *testing.T) {
 		require.NoError(err)
 
 		// LRU order is approximated, but not exact.
-		rebootedEvictionOrder := store.evictionOrder()
+		rebootedEvictionOrder := store.impl.evictionOrder()
 		require.NotEqual(evictionOrderBeforeCrash, rebootedEvictionOrder)
 		wantEvictionOrder := []string{cKey, dKey, eKey}
 		require.Equal(wantEvictionOrder, rebootedEvictionOrder)
@@ -217,7 +217,7 @@ func TestCrashRecovery(t *testing.T) {
 		// since 10KB of blobs are in store, `c` gets evicted to put the store back within its capacity.
 		require.NotContains(store.List(), cKey)
 
-		require.Equal([]string{dKey, eKey}, store.evictionOrder())
+		require.Equal([]string{dKey, eKey}, store.impl.evictionOrder())
 		require.Contains(store.List(), aKey)
 	})
 
@@ -280,14 +280,14 @@ func TestIncompleteBlobDownloadResumedAfterMultipleCrashes(t *testing.T) {
 	require.NoError(err)
 	require.Equal(wantData, data)
 	// The declared size is recovered correctly both times, without leaking or duplicating reservation.
-	require.Equal(4*memsize.KB, store.size)
+	require.Equal(4*memsize.KB, store.impl.size)
 	require.NoError(store.MarkComplete(key))
 
 	// Third crash.
 	store, err = NewStore(&Config{10 * memsize.KB, rootDir, true, _defaultShardLength}, tally.NoopScope)
 	require.NoError(err)
 	// now that the blob is complete, its actual size should be rebooted through stat, instead of trusting the _size sidecar file.
-	require.Equal(5*memsize.KB, store.size)
+	require.Equal(5*memsize.KB, store.impl.size)
 	f, err = store.ScopeComplete().Open(key)
 	require.NoError(err)
 	defer func(f io.Closer) { require.NoError(f.Close()) }(f)
@@ -311,7 +311,7 @@ func TestStoreWorksWhenFileSizeNotCorrect(t *testing.T) {
 	require.NoError(underreportedF.Close())
 	require.NoError(store.MarkComplete(underreportedKey))
 	require.NoError(store.BanEviction(underreportedKey))
-	require.Equal(8*memsize.KB, store.size)
+	require.Equal(8*memsize.KB, store.impl.size)
 
 	// Even though only 1KB is actually used on disk, the store enforces capacity based on the
 	// declared 8KB, so a 3KB blob doesn't fit alongside it (there's nothing evictable to make room).
@@ -324,14 +324,14 @@ func TestStoreWorksWhenFileSizeNotCorrect(t *testing.T) {
 	require.NoError(overreportedF.Close())
 	require.NoError(store.MarkComplete(overreportedKey))
 	// The store still only accounts for the declared 2KB, not the actual 5KB written.
-	require.Equal(10*memsize.KB, store.size)
+	require.Equal(10*memsize.KB, store.impl.size)
 
 	// Deleting releases exactly the declared size that was reserved, not the actual bytes found on
 	// disk, keeping reservation accounting self-consistent in both directions.
 	require.NoError(store.Delete(overreportedKey))
-	require.Equal(8*memsize.KB, store.size)
+	require.Equal(8*memsize.KB, store.impl.size)
 	require.NoError(store.Delete(underreportedKey))
-	require.Equal(uint64(0), store.size)
+	require.Equal(uint64(0), store.impl.size)
 }
 
 func fillWithRandomData(t *testing.T, f storelib.FileReadWriter, sizeBytes uint64) []byte {

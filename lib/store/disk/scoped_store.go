@@ -27,7 +27,7 @@ var ErrOutOfScope = errors.New("the blob is in Store but filtered by the selecte
 //
 //   - Supports directory sharding to speed up disk performance.
 type Store struct {
-	*store
+	impl  *store
 	scope blobScope
 }
 
@@ -44,7 +44,7 @@ func NewStore(config *Config, metrics tally.Scope) (*Store, error) {
 		return nil, err
 	}
 	return &Store{
-		store: s,
+		impl:  s,
 		scope: blobScopeAny,
 	}, nil
 }
@@ -52,62 +52,62 @@ func NewStore(config *Config, metrics tally.Scope) (*Store, error) {
 // Create adds a new, incomplete blob to the store and reserves space for it.
 // Incomplete entries cannot be automatically evicted. MarkComplete must be called once the blob is complete.
 // The store uses `sizeBytes` for its eviction logic even if the blob's real size differs.
-func (s *store) Create(key string, sizeBytes uint64) (storelib.FileReadWriter, error) {
-	return s.create(key, sizeBytes)
+func (s *Store) Create(key string, sizeBytes uint64) (storelib.FileReadWriter, error) {
+	return s.impl.Create(key, sizeBytes)
 }
 
 // Open returns an FD to a file in the store. [os.ErrNotExist] is returned on missing entry.
-func (s *Store) Open(key string) (storelib.FileReadWriter, error) { return s.open(key, s.scope) }
+func (s *Store) Open(key string) (storelib.FileReadWriter, error) { return s.impl.Open(key, s.scope) }
 
 // Stat returns [os.FileInfo] about the blob. Returns [os.ErrNotExist] if the blob is not found.
-func (s *Store) Stat(key string) (os.FileInfo, error) { return s.stat(key, s.scope) }
+func (s *Store) Stat(key string) (os.FileInfo, error) { return s.impl.Stat(key, s.scope) }
 
 // MarkComplete marks a blob as fully written. It enlists the blob for LRU eviction (unless BanEviction has been called).
 // Additionally, other store APIs may filter blobs based on completeness.
-func (s *store) MarkComplete(key string) error { return s.markComplete(key) }
+func (s *Store) MarkComplete(key string) error { return s.impl.MarkComplete(key) }
 
 // Delete removes a blob and its [metadata.Metadata] from the store.
-func (s *Store) Delete(key string) error { return s.delete(key, s.scope) }
+func (s *Store) Delete(key string) error { return s.impl.Delete(key, s.scope) }
 
 // List returns the keys of all blobs (except those out of scope).
-func (s *Store) List() []string { return s.list(s.scope) }
+func (s *Store) List() []string { return s.impl.list(s.scope) }
 
 // BanEviction marks a blob as unevictable by LRU eviction. It is idempotent.
 // Needed when e.g. blobs must be written back to GCS/S3 and eviction before that is unacceptable.
-func (s *Store) BanEviction(key string) error { return s.banEviction(key, s.scope) }
+func (s *Store) BanEviction(key string) error { return s.impl.BanEviction(key, s.scope) }
 
 // UnbanEviction removes the effect of BanEviction for a blob. It is idempotent.
-func (s *Store) UnbanEviction(key string) error { return s.unbanEviction(key, s.scope) }
+func (s *Store) UnbanEviction(key string) error { return s.impl.UnbanEviction(key, s.scope) }
 
 // SetMetadata atomically sets the respective metadata for a blob.
 func (s *Store) SetMetadata(key string, md metadata.Metadata) error {
-	return s.setMetadata(key, md, s.scope)
+	return s.impl.SetMetadata(key, md, s.scope)
 }
 
 // GetMetadata populates `md` if the metadata is present. Returns [os.ErrNotExist] if key is not in store.
 func (s *Store) GetMetadata(key string, md metadata.Metadata) (ok bool, err error) {
-	return s.getMetadata(key, md, s.scope)
+	return s.impl.GetMetadata(key, md, s.scope)
 }
 
 // DeleteMetadata removes any metadata of a blob with `md`'s suffix, if present.
 func (s *Store) DeleteMetadata(key string, md metadata.Metadata) error {
-	return s.deleteMetadata(key, md, s.scope)
+	return s.impl.DeleteMetadata(key, md, s.scope)
 }
 
 // ListMetadata returns all [metadata.Metadata] of key.
 func (s *Store) ListMetadata(key string) ([]metadata.Metadata, error) {
-	return s.listMetadata(key, s.scope)
+	return s.impl.ListMetadata(key, s.scope)
 }
 
 // WriteAtMetadata implements [io.WriterAt] for the metadata file on disk.
 func (s *Store) WriteAtMetadata(key string, md metadata.Metadata, p []byte, off int64) error {
-	return s.writeAtMetadata(key, md, p, off, s.scope)
+	return s.impl.WriteAtMetadata(key, md, p, off, s.scope)
 }
 
 // ScopeComplete scopes [Store]'s APIs such that they can only operate on complete blobs.
 // [ErrOutOfScope] is returned if the user tries to operate on an incomplete blob.
-func (s *Store) ScopeComplete() *Store { return &Store{s.store, blobScopeComplete} }
+func (s *Store) ScopeComplete() *Store { return &Store{s.impl, blobScopeComplete} }
 
 // ScopeIncomplete scopes [Store]'s APIs such that they can only operate on incomplete blobs.
 // [ErrOutOfScope] is returned if the user tries to operate on a complete blob.
-func (s *Store) ScopeIncomplete() *Store { return &Store{s.store, blobScopeIncomplete} }
+func (s *Store) ScopeIncomplete() *Store { return &Store{s.impl, blobScopeIncomplete} }
