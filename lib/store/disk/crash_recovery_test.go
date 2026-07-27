@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -15,111 +16,127 @@ import (
 )
 
 func TestCrashRecovery(t *testing.T) {
-	t.Run("blobs, evictability, completeness, and size are recovered", func(t *testing.T) {
-		require := require.New(t)
-		store, rootDir := newTestStore(t, 10*memsize.KB, true)
+	t.Run("blobs, evictability, completeness, and size are recovered regardless of sharding", func(t *testing.T) {
+		for _, shardLength := range []int{0, _defaultShardLength, 4} {
+			require := require.New(t)
 
-		completeEvictableF, completeEvictableKey := newTestFile(t, store, 2*memsize.KB)
-		completeEvictableData := fillWithRandomData(t, completeEvictableF, 2*memsize.KB)
-		// We don't have to test case where file is not closed, as linux closes all FDs owned by a process upon process death.
-		require.NoError(completeEvictableF.Close())
-		require.NoError(store.MarkComplete(completeEvictableKey))
+			rootDir, err := os.MkdirTemp("/tmp", "kraken-disk-store")
+			require.NoError(err)
+			t.Cleanup(func() { _ = os.RemoveAll(rootDir) })
+			config := &Config{
+				CapacityBytes:         10 * memsize.KB,
+				RootDir:               rootDir,
+				RebootIncompleteBlobs: true,
+				ShardLength:           shardLength,
+			}
 
-		completeUnevictableF, completeUnevictableKey := newTestFile(t, store, 2*memsize.KB)
-		completeUnevictableData := fillWithRandomData(t, completeUnevictableF, 2*memsize.KB)
-		require.NoError(completeUnevictableF.Close())
-		require.NoError(store.MarkComplete(completeUnevictableKey))
-		require.NoError(store.BanEviction(completeUnevictableKey))
+			store, err := NewStore(config, tally.NoopScope)
+			require.NoError(err)
 
-		incompleteEvictableF, incompleteEvictableKey := newTestFile(t, store, 2*memsize.KB)
-		incompleteEvictableData := fillWithRandomData(t, incompleteEvictableF, 2*memsize.KB)
-		require.NoError(incompleteEvictableF.Close())
+			completeEvictableF, completeEvictableKey := newTestFile(t, store, 2*memsize.KB)
+			completeEvictableData := fillWithRandomData(t, completeEvictableF, 2*memsize.KB)
+			// We don't have to test case where file is not closed, as linux closes all FDs owned by a process upon process death.
+			require.NoError(completeEvictableF.Close())
+			require.NoError(store.MarkComplete(completeEvictableKey))
 
-		incompleteUnevictableF, incompleteUnevictableKey := newTestFile(t, store, 2*memsize.KB)
-		incompleteUnevictableData := fillWithRandomData(t, incompleteUnevictableF, 2*memsize.KB)
-		require.NoError(incompleteUnevictableF.Close())
-		require.NoError(store.BanEviction(incompleteUnevictableKey))
+			completeUnevictableF, completeUnevictableKey := newTestFile(t, store, 2*memsize.KB)
+			completeUnevictableData := fillWithRandomData(t, completeUnevictableF, 2*memsize.KB)
+			require.NoError(completeUnevictableF.Close())
+			require.NoError(store.MarkComplete(completeUnevictableKey))
+			require.NoError(store.BanEviction(completeUnevictableKey))
 
-		// Assume that the application crashes here. The application would restart and call `NewStore`.
-		store, err := NewStore(&Config{10 * memsize.KB, rootDir, true, _defaultShardLength}, tally.NoopScope)
-		require.NoError(err)
+			incompleteEvictableF, incompleteEvictableKey := newTestFile(t, store, 2*memsize.KB)
+			incompleteEvictableData := fillWithRandomData(t, incompleteEvictableF, 2*memsize.KB)
+			require.NoError(incompleteEvictableF.Close())
 
-		// Incomplete files are recovered (since `rebootIncompleteBlobs` is true).
-		f, err := store.Open(incompleteEvictableKey)
-		require.NoError(err)
-		defer func(f io.Closer) { require.NoError(f.Close()) }(f)
-		data, err := io.ReadAll(f)
-		require.NoError(err)
-		require.Equal(incompleteEvictableData, data)
-		unevictable, err := store.impl.checkDiskIfUnevictable(completeEvictableKey, _incompleteBlob)
-		require.NoError(err)
-		require.False(unevictable)
+			incompleteUnevictableF, incompleteUnevictableKey := newTestFile(t, store, 2*memsize.KB)
+			incompleteUnevictableData := fillWithRandomData(t, incompleteUnevictableF, 2*memsize.KB)
+			require.NoError(incompleteUnevictableF.Close())
+			require.NoError(store.BanEviction(incompleteUnevictableKey))
 
-		f, err = store.Open(incompleteUnevictableKey)
-		require.NoError(err)
-		defer func(f io.Closer) { require.NoError(f.Close()) }(f)
-		data, err = io.ReadAll(f)
-		require.NoError(err)
-		require.Equal(incompleteUnevictableData, data)
-		unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _incompleteBlob)
-		require.NoError(err)
-		require.False(unevictable)
+			// Assume that the application crashes here. The application would restart and call `NewStore`.
+			store, err = NewStore(&Config{10 * memsize.KB, rootDir, true, shardLength}, tally.NoopScope)
+			require.NoError(err)
 
-		// Complete files are always recovered.
-		f, err = store.ScopeComplete().Open(completeEvictableKey)
-		require.NoError(err)
-		defer func(f io.Closer) { require.NoError(f.Close()) }(f)
-		data, err = io.ReadAll(f)
-		require.NoError(err)
-		require.Equal(completeEvictableData, data)
-		unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
-		require.NoError(err)
-		require.False(unevictable)
+			require.Equal(8*memsize.KB, store.impl.size)
 
-		f, err = store.ScopeComplete().Open(completeUnevictableKey)
-		require.NoError(err)
-		defer func(f io.Closer) { require.NoError(f.Close()) }(f)
-		data, err = io.ReadAll(f)
-		require.NoError(err)
-		require.Equal(completeUnevictableData, data)
-		unevictable, err = store.impl.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
-		require.NoError(err)
-		require.True(unevictable)
+			// Incomplete files are recovered (since `rebootIncompleteBlobs` is true).
+			f, err := store.Open(incompleteEvictableKey)
+			require.NoError(err)
+			defer func(f io.Closer) { require.NoError(f.Close()) }(f)
+			data, err := io.ReadAll(f)
+			require.NoError(err)
+			require.Equal(incompleteEvictableData, data)
+			unevictable, err := store.impl.checkDiskIfUnevictable(incompleteEvictableKey, _incompleteBlob)
+			require.NoError(err)
+			require.False(unevictable)
 
-		// The sizes of both incomplete and complete files are recovered correctly.
-		require.Equal(8*memsize.KB, store.impl.size)
+			f, err = store.Open(incompleteUnevictableKey)
+			require.NoError(err)
+			defer func(f io.Closer) { require.NoError(f.Close()) }(f)
+			data, err = io.ReadAll(f)
+			require.NoError(err)
+			require.Equal(incompleteUnevictableData, data)
+			unevictable, err = store.impl.checkDiskIfUnevictable(incompleteUnevictableKey, _incompleteBlob)
+			require.NoError(err)
+			require.True(unevictable)
 
-		// Run the store with `rebootIncompleteBlobs` as false.
-		store, err = NewStore(&Config{10 * memsize.KB, rootDir, false, _defaultShardLength}, tally.NoopScope)
-		require.NoError(err)
+			// Complete files are always recovered.
+			f, err = store.ScopeComplete().Open(completeEvictableKey)
+			require.NoError(err)
+			defer func(f io.Closer) { require.NoError(f.Close()) }(f)
+			data, err = io.ReadAll(f)
+			require.NoError(err)
+			require.Equal(completeEvictableData, data)
+			unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
+			require.NoError(err)
+			require.False(unevictable)
 
-		// Incomplete files are dropped.
-		rebootedKeys := store.List()
-		require.NotContains(rebootedKeys, incompleteEvictableKey)
-		require.NotContains(rebootedKeys, incompleteUnevictableKey)
+			f, err = store.ScopeComplete().Open(completeUnevictableKey)
+			require.NoError(err)
+			defer func(f io.Closer) { require.NoError(f.Close()) }(f)
+			data, err = io.ReadAll(f)
+			require.NoError(err)
+			require.Equal(completeUnevictableData, data)
+			unevictable, err = store.impl.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
+			require.NoError(err)
+			require.True(unevictable)
 
-		// Complete files are always recovered.
-		f, err = store.ScopeComplete().Open(completeEvictableKey)
-		require.NoError(err)
-		defer func(f io.Closer) { require.NoError(f.Close()) }(f)
-		data, err = io.ReadAll(f)
-		require.NoError(err)
-		require.Equal(completeEvictableData, data)
-		unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
-		require.NoError(err)
-		require.False(unevictable)
+			// The sizes of both incomplete and complete files are recovered correctly.
+			require.Equal(8*memsize.KB, store.impl.size)
 
-		f, err = store.ScopeComplete().Open(completeUnevictableKey)
-		require.NoError(err)
-		defer func(f io.Closer) { require.NoError(f.Close()) }(f)
-		data, err = io.ReadAll(f)
-		require.NoError(err)
-		require.Equal(completeUnevictableData, data)
-		unevictable, err = store.impl.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
-		require.NoError(err)
-		require.True(unevictable)
+			// Run the store with `rebootIncompleteBlobs` as false.
+			store, err = NewStore(&Config{10 * memsize.KB, rootDir, false, shardLength}, tally.NoopScope)
+			require.NoError(err)
 
-		require.Equal(4*memsize.KB, store.impl.size)
+			// Incomplete files are dropped.
+			rebootedKeys := store.List()
+			require.NotContains(rebootedKeys, incompleteEvictableKey)
+			require.NotContains(rebootedKeys, incompleteUnevictableKey)
+
+			// Complete files are always recovered.
+			f, err = store.ScopeComplete().Open(completeEvictableKey)
+			require.NoError(err)
+			defer func(f io.Closer) { require.NoError(f.Close()) }(f)
+			data, err = io.ReadAll(f)
+			require.NoError(err)
+			require.Equal(completeEvictableData, data)
+			unevictable, err = store.impl.checkDiskIfUnevictable(completeEvictableKey, _completeBlob)
+			require.NoError(err)
+			require.False(unevictable)
+
+			f, err = store.ScopeComplete().Open(completeUnevictableKey)
+			require.NoError(err)
+			defer func(f io.Closer) { require.NoError(f.Close()) }(f)
+			data, err = io.ReadAll(f)
+			require.NoError(err)
+			require.Equal(completeUnevictableData, data)
+			unevictable, err = store.impl.checkDiskIfUnevictable(completeUnevictableKey, _completeBlob)
+			require.NoError(err)
+			require.True(unevictable)
+
+			require.Equal(4*memsize.KB, store.impl.size)
+		}
 	})
 
 	t.Run("metadata is recovered for complete blob", func(t *testing.T) {

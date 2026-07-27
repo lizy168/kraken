@@ -25,7 +25,7 @@ type rebootedBlob struct {
 }
 
 func rebootPersistedStore(config *Config, log *zap.SugaredLogger, metrics tally.Scope) (*store, error) {
-	completeDirPath, incompleteDirPath := filepath.Join(config.RootDir, _completeSubDir), filepath.Join(config.RootDir, _incompleteSubDir)
+	incompleteDirPath := filepath.Join(config.RootDir, _incompleteSubDir)
 	if !config.RebootIncompleteBlobs {
 		err := os.RemoveAll(incompleteDirPath)
 		if err != nil {
@@ -34,13 +34,13 @@ func rebootPersistedStore(config *Config, log *zap.SugaredLogger, metrics tally.
 	}
 
 	pather := newPather(config.RootDir, config.ShardLength)
-	keys, err := pather.rebootKeys(completeDirPath)
+	keys, err := pather.rebootKeys(_completeBlob)
 	if err != nil {
 		return nil, err
 	}
 	numCompleteBlobs := len(keys)
 	if config.RebootIncompleteBlobs {
-		incompleteKeys, err := pather.rebootKeys(incompleteDirPath)
+		incompleteKeys, err := pather.rebootKeys(_incompleteBlob)
 		if err != nil {
 			return nil, err
 		}

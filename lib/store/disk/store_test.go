@@ -592,8 +592,7 @@ func TestList(t *testing.T) {
 	require := require.New(t)
 	store, _ := newTestStore(t, 10*memsize.KB, false)
 
-	require.Empty(store.ScopeComplete().List())
-	require.Empty(store.ScopeComplete().List())
+	require.Empty(store.List())
 
 	incompleteBlobKey := core.DigestFixture().Hex()
 	f, err := store.Create(incompleteBlobKey, 10*memsize.B)
@@ -847,6 +846,10 @@ func TestMetadata(t *testing.T) {
 		require.NoError(err)
 		require.NoError(f.Close())
 		require.NoError(store.BanEviction(key))
+		// A sidecar of every blob when [Config.RebootIncompleteBlobs] is on.
+		sizeSidecarFilePath := store.impl.sidecarFilePath(key, _incompleteBlob, _blobSizeFileName)
+		_, err = os.Stat(sizeSidecarFilePath)
+		require.NoError(err)
 
 		mdList, err := store.ListMetadata(key)
 		require.NoError(err)
@@ -1039,9 +1042,13 @@ func TestScopesDelete(t *testing.T) {
 	f, key = newTestFile(t, store, 1*memsize.KB)
 	require.NoError(f.Close())
 	require.NoError(store.Delete(key))
+	_, err = store.Stat(key)
+	require.ErrorIs(err, os.ErrNotExist)
 
 	f, key = newTestFile(t, store, 1*memsize.KB)
 	require.NoError(f.Close())
 	require.NoError(store.MarkComplete(key))
 	require.NoError(store.Delete(key))
+	_, err = store.Stat(key)
+	require.ErrorIs(err, os.ErrNotExist)
 }

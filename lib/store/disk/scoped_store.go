@@ -104,7 +104,7 @@ func (s *Store) WriteAtMetadata(key string, md metadata.Metadata, p []byte, off 
 	return s.impl.WriteAtMetadata(key, md, p, off, s.scope)
 }
 
-// ScopeComplete scopes [Store]'s APIs such that they can only operate on complete blobs.
+// ScopeComplete scopes [Store]'s APIs such that they can only operate on complete blobs (except MarkComplete and Create).
 // [ErrOutOfScope] is returned if the user tries to operate on an incomplete blob.
 func (s *Store) ScopeComplete() *Store { return &Store{s.impl, blobScopeComplete} }
 
